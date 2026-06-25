@@ -1,48 +1,56 @@
 import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from langchain_openai import ChatOpenAI
-from langchain.prompts import ChatPromptTemplate
-from langchain.output_parsers import ResponseSchema, StructuredOutputParser
+from sqlalchemy import create_engine, Column, Integer, String, JSON
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
 
-# 1. Setup App and LLM
+# LangChain Imports
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.vectorstores import Chroma
+from langchain.chains import RetrievalQA
+
+# --- 1. Database Setup ---
+DATABASE_URL = "sqlite:///./analytics.db"
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+class AnalysisRecord(Base):
+    __tablename__ = "analytics"
+    id = Column(Integer, primary_key=True, index=True)
+    query = Column(String)
+    analysis_result = Column(JSON)
+
+Base.metadata.create_all(bind=engine)
+
+# --- 2. RAG & LLM Setup ---
+# Assume you have a folder named 'docs' with your PDFs
+vectorstore = Chroma(persist_directory="./chroma_db", embedding_function=OpenAIEmbeddings())
+llm = ChatOpenAI(model="gpt-4o", temperature=0)
+qa_chain = RetrievalQA.from_chain_type(llm=llm, chain_type="stuff", retriever=vectorstore.as_retriever())
+
+# --- 3. FastAPI App ---
 app = FastAPI()
-llm = ChatOpenAI(model="gpt-4o", temperature=0) # temperature 0 for consistent output
 
-# 2. Define the desired output structure
-response_schemas = [
-    ResponseSchema(name="sentiment", description="The overall sentiment: Positive, Negative, or Neutral."),
-    ResponseSchema(name="key_topics", description="A list of 3-5 main topics discussed in the text."),
-    ResponseSchema(name="summary", description="A one-sentence summary of the text.")
-]
-output_parser = StructuredOutputParser.from_response_schemas(response_schemas)
+class QueryRequest(BaseModel):
+    user_query: str
 
-# 3. Request Model
-class AnalysisRequest(BaseModel):
-    text: str
-
-# 4. API Endpoint
-@app.post("/analyze")
-async def analyze_text(request: AnalysisRequest):
+@app.post("/ask")
+async def ask_and_save(request: QueryRequest):
     try:
-        # Create the prompt with format instructions
-        prompt = ChatPromptTemplate.from_template(
-            "Analyze the following text and provide the results in the requested format.\n"
-            "{format_instructions}\n"
-            "Text: {text}"
-        )
-        
-        # Build the chain
-        chain = prompt | llm | output_parser
-        
-        # Execute
-        result = chain.invoke({
-            "format_instructions": output_parser.get_format_instructions(),
-            "text": request.text
-        })
-        
-        return result
+        # A. Execute RAG
+        response = qa_chain.invoke({"query": request.user_query})
+        result_text = response["result"]
+
+        # B. Persist in Database
+        db = SessionLocal()
+        new_entry = AnalysisRecord(query=request.user_query, analysis_result={"answer": result_text})
+        db.add(new_entry)
+        db.commit()
+        db.refresh(new_entry)
+        db.close()
+
+        return {"id": new_entry.id, "answer": result_text}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-# Run with: uvicorn main:app --reload
