@@ -10,6 +10,12 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain.chains import RetrievalQA
 
+# Add these to your environment
+os.environ["LANGCHAIN_TRACING_V2"] = "true"
+os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
+os.environ["LANGCHAIN_API_KEY"] = "your_api_key"
+os.environ["LANGCHAIN_PROJECT"] = "text-analytics-platform"
+
 # --- 1. Database Setup ---
 DATABASE_URL = "sqlite:///./analytics.db"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -29,6 +35,8 @@ Base.metadata.create_all(bind=engine)
 vectorstore = Chroma(persist_directory="./chroma_db", embedding_function=OpenAIEmbeddings())
 llm = ChatOpenAI(model="gpt-4o", temperature=0)
 qa_chain = RetrievalQA.from_chain_type(llm=llm, chain_type="stuff", retriever=vectorstore.as_retriever())
+
+
 
 # --- 3. FastAPI App ---
 app = FastAPI()
